@@ -1,4 +1,4 @@
-﻿using ExileCore2;
+﻿using ExileCore;
 
 namespace PluginUpdater;
 

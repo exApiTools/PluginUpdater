@@ -7,8 +7,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using ExileCore2;
-using ExileCore2.Shared;
+using ExileCore;
+using ExileCore.Shared;
 using LibGit2Sharp;
 using LibGit2Sharp.Handlers;
 

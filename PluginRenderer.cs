@@ -4,9 +4,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using ExileCore2;
-using ExileCore2.Shared.Attributes;
-using ExileCore2.Shared.Interfaces;
+using ExileCore;
+using ExileCore.Shared.Attributes;
 using ImGuiNET;
 
 namespace PluginUpdater
@@ -735,7 +734,7 @@ namespace PluginUpdater
                 _loadError = string.Empty;
 
                 using var client = new System.Net.Http.HttpClient();
-                var response = await client.GetStringAsync("https://raw.githubusercontent.com/exCore2/PluginBrowserData/refs/heads/data/output.json");
+                var response = await client.GetStringAsync("https://raw.githubusercontent.com/instantsc/PluginBrowserData/refs/heads/data/output.json");
 
                 var repoData = System.Text.Json.JsonSerializer.Deserialize<PluginRepositoryData>(
                     response,
@@ -771,7 +770,7 @@ namespace PluginUpdater
                 _ = LoadRepositoriesAsync();
             }
 
-            ImGui.TextWrapped("Browse and download available plugins from the ExileCore2 organization.");
+            ImGui.TextWrapped("Browse and download available plugins from the ExileCore organization.");
             ImGui.Spacing();
 
             if (_isLoadingRepos)

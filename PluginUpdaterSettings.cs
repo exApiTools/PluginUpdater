@@ -1,7 +1,7 @@
 ﻿using System;
-using ExileCore2;
-using ExileCore2.Shared.Interfaces;
-using ExileCore2.Shared.Nodes;
+using ExileCore;
+using ExileCore.Shared.Interfaces;
+using ExileCore.Shared.Nodes;
 using Newtonsoft.Json;
 
 namespace PluginUpdater;
