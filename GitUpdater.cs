@@ -35,6 +35,7 @@ namespace PluginUpdater
     public class GitUpdater : IDisposable
     {
         private readonly PluginManager _pluginManager;
+        private readonly ConsoleLog _consoleLog;
         private readonly string _pluginFolder;
         private readonly ConcurrentDictionary<string, PluginInfo> _pluginInfo = new(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource _updateCts;
@@ -69,9 +70,10 @@ namespace PluginUpdater
                 return null;
             }).Where(p => p != null);
 
-        public GitUpdater(PluginManager pluginManager)
+        public GitUpdater(PluginManager pluginManager, ConsoleLog consoleLog)
         {
             _pluginManager = pluginManager;
+            _consoleLog = consoleLog;
             _pluginFolder = pluginManager.SourcePluginDirectoryPath;
             UpdateLocal();
         }
@@ -91,7 +93,7 @@ namespace PluginUpdater
             {
                 try
                 {
-                    using var repo = new Repository(pluginInfo.Path);
+                    using var repo = GitNative.CreateWithWorkspaceHandling(pluginInfo.Path);
                     SetPluginInfo(pluginInfo, repo);
                     _pluginInfo[pluginInfo.Name] = pluginInfo;
                 }
@@ -241,7 +243,8 @@ namespace PluginUpdater
                 {
                     await Task.Run(() =>
                     {
-                        using var repo = new Repository(pluginInfo.Path);
+                        pluginInfo.Error = null;
+                        using var repo = GitNative.CreateWithWorkspaceHandling(pluginInfo.Path);
                         SetPluginInfo(pluginInfo, repo);
                         _pluginInfo[pluginInfo.Name] = pluginInfo;
 
@@ -254,9 +257,22 @@ namespace PluginUpdater
                         var trackingBranch = repo.Head.TrackedBranch;
 
                         var remote = GetHeadRemote(repo, false);
-                        var refSpecs = remote.FetchRefSpecs.Select(r => r.Specification);
+                        if (remote != null)
+                        {
+                            var refSpecs = remote.FetchRefSpecs.Select(r => r.Specification);
 
-                        Commands.Fetch(repo, remote.Name, refSpecs, fetchOptions, null);
+                            try
+                            {
+                                Commands.Fetch(repo, remote.Name, refSpecs, fetchOptions, null);
+                            }
+                            catch (LibGit2SharpException ex) when (ex.Message == "unexpected http status code: 404")
+                            {
+                                var errorText = $"{pluginInfo.Path}: Unable to fetch remote {remote.Name} (got 404), was the plugin removed by the author?";
+                                DebugWindow.LogError(errorText);
+                                pluginInfo.Error = errorText;
+                                _consoleLog.LogError(errorText);
+                            }
+                        }
 
                         if (trackingBranch == null)
                         {
@@ -277,13 +293,14 @@ namespace PluginUpdater
                 {
                     DebugWindow.LogError($"Error processing {pluginInfo.Path}: {e}");
                     pluginInfo.Error = e.Message;
+                    _consoleLog.LogError($"{pluginInfo.Path}: {e.Message}");
                     if (_pluginInfo.ContainsKey(pluginInfo.Name))
                     {
                         _pluginInfo[pluginInfo.Name] = pluginInfo;
                     }
                     else
                     {
-                        using var repo = new Repository(pluginInfo.Path);
+                        using var repo = GitNative.CreateWithWorkspaceHandling(pluginInfo.Path);
                         SetPluginInfo(pluginInfo, repo);
                         _pluginInfo.TryAdd(pluginInfo.Name, pluginInfo);
                     }
@@ -308,7 +325,7 @@ namespace PluginUpdater
             {
                 try
                 {
-                    using var repo = new Repository(folder.Path);
+                    using var repo = GitNative.CreateWithWorkspaceHandling(folder.Path);
                     var parent = repo.Head.Tip.Parents.FirstOrDefault() ?? throw new Exception("Cannot revert: no parent commit found");
                     repo.Reset(ResetMode.Hard, parent);
                     plugin.LastMessage = $"Reset to parent commit {parent.Sha[..7]}";
@@ -338,9 +355,13 @@ namespace PluginUpdater
             {
                 try
                 {
-                    using var repo = new Repository(folder.Path);
+                    using var repo = GitNative.CreateWithWorkspaceHandling(folder.Path);
 
                     var remote = GetHeadRemote(repo);
+                    if (remote == null)
+                    {
+                        throw new Exception("Unable to update without a remote");
+                    }
 
                     var refSpecs = remote.FetchRefSpecs.Select(r => r.Specification);
                     Commands.Fetch(repo, remote.Name, refSpecs, new FetchOptions
@@ -382,9 +403,13 @@ namespace PluginUpdater
             {
                 try
                 {
-                    using var repo = new Repository(folder.Path);
+                    using var repo = GitNative.CreateWithWorkspaceHandling(folder.Path);
 
                     var remote = GetHeadRemote(repo);
+                    if (remote == null)
+                    {
+                        throw new Exception("Unable to update without a remote");
+                    }
 
                     var refSpecs = remote.FetchRefSpecs.Select(r => r.Specification);
                     Commands.Fetch(repo, remote.Name, refSpecs, new FetchOptions
@@ -416,7 +441,7 @@ namespace PluginUpdater
             });
         }
 
-        private static Remote GetHeadRemote(Repository repo, bool throwOnNoTracking = true)
+        private Remote GetHeadRemote(Repository repo, bool throwOnNoTracking = true)
         {
             var headTrackedBranch = repo.Head.TrackedBranch;
             if (throwOnNoTracking && headTrackedBranch is null)
@@ -428,8 +453,25 @@ namespace PluginUpdater
             {
                 ({ RemoteName: { } remoteName }, _) => repo.Network.Remotes[remoteName],
                 (_, { RemoteName: { } remoteName }) => repo.Network.Remotes[remoteName],
-                _ => repo.Network.Remotes["updater_remote"] ?? repo.Network.Remotes["origin"] ?? repo.Network.Remotes.Single(),
+                _ => repo.Network.Remotes["updater_remote"] ?? repo.Network.Remotes["origin"] ?? TryGetSingleRemote(repo),
             };
+        }
+
+        private Remote TryGetSingleRemote(Repository repo)
+        {
+            if (!repo.Network.Remotes.Any())
+            {
+                _consoleLog.LogWarning($"Repo {repo.Info.WorkingDirectory} has no remotes and cannot be updated");
+                return null;
+            }
+            else if (repo.Network.Remotes.Count() > 1)
+            {
+                _consoleLog.LogWarning($"Repo {repo.Info.WorkingDirectory} has multiple remotes and the selected branch has no tracked remote configured. " +
+                                       $"Expected a single remote, or a remote named 'updater_remote' or 'origin'");
+                return null;
+            }
+
+            return repo.Network.Remotes.Single();
         }
 
         private static string ExtractRepoNameAndBranch(string repoUrl, out string branch)
@@ -487,7 +529,7 @@ namespace PluginUpdater
 
                     if (!string.IsNullOrEmpty(branch))
                     {
-                        using var branchRepo = new Repository(targetPath);
+                        using var branchRepo = GitNative.CreateWithWorkspaceHandling(targetPath);
                         var targetBranch = branchRepo.Branches[$"origin/{branch}"] ?? throw new Exception($"Branch '{branch}' not found in repository");
                         var localBranch = branchRepo.CreateBranch(branch, targetBranch.Tip);
                         branchRepo.Branches.Update(localBranch,
@@ -496,7 +538,7 @@ namespace PluginUpdater
                         Commands.Checkout(branchRepo, localBranch);
                     }
 
-                    using var finalRepo = new Repository(targetPath);
+                    using var finalRepo = GitNative.CreateWithWorkspaceHandling(targetPath);
                     var pluginInfo = new PluginInfo
                     {
                         Name = repoName,
@@ -539,8 +581,6 @@ namespace PluginUpdater
             {
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
-
-                using (var repo = new Repository(pluginPath)) { }
 
                 foreach (var file in Directory.GetFiles(pluginPath, "*.*", SearchOption.AllDirectories))
                     File.SetAttributes(file, FileAttributes.Normal);
@@ -641,7 +681,7 @@ namespace PluginUpdater
             
             await Task.Run(() =>
             {
-                using var repo = new Repository(pluginPath);
+                using var repo = GitNative.CreateWithWorkspaceHandling(pluginPath);
                 Branch branch;
 
                 foreach (var remote in repo.Network.Remotes)
@@ -676,7 +716,7 @@ namespace PluginUpdater
                 }
 
                 // If local branch doesn't exist, try to create it from remote
-                else if (repo.Branches[$"{GetHeadRemote(repo, false).Name}/{branchName}"] is { } remoteBranch)
+                else if (GetHeadRemote(repo, false) is { } headRemote && repo.Branches[$"{headRemote.Name}/{branchName}"] is { } remoteBranch)
                 {
                     branch = repo.CreateBranch(branchName, remoteBranch.Tip);
                     // Set up tracking

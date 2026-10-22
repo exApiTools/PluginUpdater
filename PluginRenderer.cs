@@ -3,7 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Numerics;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using ExileCore;
 using ExileCore.Shared.Attributes;
 using ImGuiNET;
@@ -22,6 +26,10 @@ namespace PluginUpdater
         public List<Fork> Forks { get; set; }
         public string Description { get; set; }
         public string EndorsedAuthor { get; set; }
+
+        public Fork GetEndorsedFork() => string.IsNullOrWhiteSpace(EndorsedAuthor)
+            ? Forks?.FirstOrDefault()
+            : Forks?.FirstOrDefault(f => f.Author == EndorsedAuthor);
     }
 
     public class Fork
@@ -59,7 +67,7 @@ namespace PluginUpdater
         private int _currentProgress;
         private int _totalProgress;
         private bool _isUpdatingAll;
-        private string _repoUrl = string.Empty;
+        private string _repoToCloneUrl = string.Empty;
         private bool _isCloning;
         private readonly List<PluginDescription> _availablePlugins = [];
         private readonly Dictionary<string, bool> _downloadingPlugins = [];
@@ -75,7 +83,7 @@ namespace PluginUpdater
 
         public void Startup()
         {
-            _updater = new GitUpdater(PluginUpdater.Instance.PluginManager);
+            _updater = new GitUpdater(PluginUpdater.Instance.PluginManager, _consoleLog);
             _updater.ProgressChanged += (current, total) =>
             {
                 _currentProgress = current;
@@ -126,7 +134,8 @@ namespace PluginUpdater
                 int updateCount = plugins.Count(p => p.CurrentCommit != p.LatestCommit);
                 if (updateCount > 0)
                 {
-                    _consoleLog.AddNotificationMessage("PendingUpdates", $"There is {updateCount} plugin {(updateCount > 1 ? "updates" : "update")} pending.",
+                    _consoleLog.AddNotificationMessage("PendingUpdates",
+                        $"There {(updateCount > 1 ? "are" : "is")} {updateCount} plugin {(updateCount > 1 ? "updates" : "update")} pending.",
                         ConsoleLog.ColorInfo);
                 }
             }
@@ -233,14 +242,7 @@ namespace PluginUpdater
                     ImGui.EndTabItem();
                 }
 
-                if (ImGui.BeginTabItem("Add"))
-                {
-                    ImGui.Spacing();
-                    RenderAddPluginSection();
-                    ImGui.EndTabItem();
-                }
-
-                if (ImGui.BeginTabItem("Browse"))
+                if (ImGui.BeginTabItem("Add&Browse"))
                 {
                     ImGui.Spacing();
                     RenderPluginBrowser();
@@ -405,6 +407,11 @@ namespace PluginUpdater
                              ImGuiTableFlags.RowBg;
 
             var plugins = _updater.GetPluginInfo();
+            if (!plugins.Any())
+            {
+                ImGui.Text("\n\nNo source plugins detected. To install, go to the Add&Browse tab\n\n");
+                return;
+            }
 
             float rowHeight = Math.Max(
                 ImGui.GetTextLineHeightWithSpacing(),
@@ -424,7 +431,7 @@ namespace PluginUpdater
             ImGui.TableHeadersRow();
             ImGui.TableNextColumn();
 
-            RenderTableRows();
+            RenderTableRows(plugins);
 
             ImGui.EndTable();
         }
@@ -437,10 +444,8 @@ namespace PluginUpdater
             ImGui.TableSetupColumn("Actions", ImGuiTableColumnFlags.WidthFixed);
         }
 
-        private void RenderTableRows()
+        private void RenderTableRows(List<PluginInfo> plugins)
         {
-            var plugins = _updater.GetPluginInfo();
-
             foreach (var pluginInfo in plugins
                          .Where(x => string.IsNullOrEmpty(_pluginNameFilter) || x.Name.Contains(_pluginNameFilter, StringComparison.OrdinalIgnoreCase))
                          .OrderBy(x => x.Name))
@@ -459,6 +464,8 @@ namespace PluginUpdater
                     DebugWindow.LogError($"Error rendering plugin {pluginInfo.Name}: {e.Message}");
                 }
             }
+
+            ShowDeletePluginPopup();
         }
 
         private static void RenderPluginName(PluginInfo pluginInfo)
@@ -641,7 +648,6 @@ namespace PluginUpdater
                         using (ImGuiHelpers.UseStyleColor(ImGuiCol.Button, new System.Numerics.Vector4(0.8f, 0.2f, 0.2f, 1.0f)))
                         using (ImGuiHelpers.UseStyleColor(ImGuiCol.ButtonHovered, new System.Numerics.Vector4(1.0f, 0.3f, 0.3f, 1.0f)))
                         using (ImGuiHelpers.UseStyleColor(ImGuiCol.ButtonActive, new System.Numerics.Vector4(0.6f, 0.1f, 0.1f, 1.0f)))
-
                             if (ImGui.Button("Force update", new System.Numerics.Vector2(buttonWidth, 0)))
                             {
                                 ImGui.CloseCurrentPopup();
@@ -683,17 +689,29 @@ namespace PluginUpdater
                 Process.Start("explorer.exe", pluginInfo.Path);
             }
 
+            ImGui.SameLine();
+
+            using (ImGuiHelpers.UseStyleColor(ImGuiCol.Button, new System.Numerics.Vector4(0.8f, 0.2f, 0.2f, 1.0f)))
+            using (ImGuiHelpers.UseStyleColor(ImGuiCol.ButtonHovered, new System.Numerics.Vector4(1.0f, 0.3f, 0.3f, 1.0f)))
+            using (ImGuiHelpers.UseStyleColor(ImGuiCol.ButtonActive, new System.Numerics.Vector4(0.6f, 0.1f, 0.1f, 1.0f)))
+                if (ImGui.Button($"Delete##{pluginInfo.Name}"))
+                {
+                    _pluginToDelete = pluginInfo.Name;
+                    ImGui.OpenPopup("Delete Plugin?");
+                }
+
             ImGui.TableNextColumn();
         }
 
+        private string _repoToLinkFilePath = "";
+        private string _repoToLinkName = "";
+        private string _repoToLinkPickResult;
+
         private void RenderAddPluginSection()
         {
-            ImGui.Text("Enter Repository URL:");
-
             var width = ImGui.GetContentRegionAvail().X - 100;
             ImGui.SetNextItemWidth(width);
-            ImGui.InputText("##repoinput", ref _repoUrl, 1024);
-
+            ImGui.InputTextWithHint("##repoinput", "Repository URL", ref _repoToCloneUrl, 1024);
             ImGui.SameLine();
 
             if (_isCloning)
@@ -704,9 +722,9 @@ namespace PluginUpdater
             }
             else if (ImGui.Button("Clone"))
             {
-                if (!string.IsNullOrWhiteSpace(_repoUrl))
+                if (!string.IsNullOrWhiteSpace(_repoToCloneUrl))
                 {
-                    _ = CloneRepositoryAsync(_repoUrl);
+                    _ = CloneRepositoryAsync(_repoToCloneUrl);
                 }
                 else
                 {
@@ -722,6 +740,65 @@ namespace PluginUpdater
             ImGui.Spacing();
             ImGui.TextWrapped("Enter the URL of a Git repository to clone. " +
                               "The repository will be cloned into the Plugins\\Source folder.");
+            ImGui.Separator();
+            ImGui.Text("Or link a local folder");
+            if (ImGui.Button("Pick csproj file"))
+            {
+                var pickThread = new Thread(() =>
+                {
+                    try
+                    {
+                        using var dialog = new OpenFileDialog { Filter = "CSPROJ files|*.csproj", CheckFileExists = true };
+                        if (dialog.ShowDialog(new CustomWindow() { Handle = Core.Current.OverlayWindowHandle }) == DialogResult.OK)
+                        {
+                            _repoToLinkPickResult = dialog.FileName;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugWindow.LogError(ex.ToString());
+                    }
+                });
+                pickThread.SetApartmentState(ApartmentState.STA);
+                pickThread.Start();
+            }
+
+            if (_repoToLinkPickResult != null)
+            {
+                _repoToLinkFilePath = _repoToLinkPickResult;
+                _repoToLinkPickResult = null;
+                _repoToLinkName = Path.GetFileNameWithoutExtension(_repoToLinkFilePath)?.Trim() ?? "";
+            }
+
+            if (ImGui.InputTextWithHint("##linkPath", ".csproj file path", ref _repoToLinkFilePath, 1024))
+            {
+                _repoToLinkName = Path.GetFileNameWithoutExtension(_repoToLinkFilePath)?.Trim() ?? "";
+            }
+
+            ImGui.InputTextWithHint("##linkName", "Name of folder to create", ref _repoToLinkName, 1024);
+            var sourcePluginsFolder = PluginUpdater.Instance.PluginManager.SourcePluginDirectoryPath;
+            ImGui.BeginDisabled(string.IsNullOrWhiteSpace(_repoToLinkFilePath) ||
+                                string.IsNullOrWhiteSpace(_repoToLinkName) ||
+                                !File.Exists(_repoToLinkFilePath));
+            var mountConfigPath = Path.Join(sourcePluginsFolder, _repoToLinkName, "mountConfig.json");
+            if (!string.IsNullOrWhiteSpace(_repoToLinkName) && File.Exists(mountConfigPath))
+            {
+                using var color = ImGuiHelpers.UseStyleColor(ImGuiCol.Text, new Vector4(1, 0, 0, 1));
+                ImGui.TextUnformatted($"Will overwrite link config in '{mountConfigPath}'");
+            }
+
+            if (ImGui.Button("Link"))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(mountConfigPath));
+                File.WriteAllText(mountConfigPath, JsonSerializer.Serialize(new { SourcePath = Path.GetDirectoryName(_repoToLinkFilePath) }));
+            }
+
+            ImGui.EndDisabled();
+        }
+
+        private class CustomWindow : IWin32Window
+        {
+            public IntPtr Handle { get; set; }
         }
 
         private async Task CloneRepositoryAsync(string repoUrl)
@@ -736,7 +813,7 @@ namespace PluginUpdater
                 await _updater.CloneRepositoryAsync(repoUrl);
 
                 _consoleLog.LogSuccess($"Successfully cloned repository");
-                _repoUrl = string.Empty;
+                _repoToCloneUrl = string.Empty;
             }
             catch (Exception ex)
             {
@@ -799,6 +876,12 @@ namespace PluginUpdater
                 _ = LoadRepositoriesAsync();
             }
 
+            if (ImGui.TreeNode("Add plugin not in the list"))
+            {
+                RenderAddPluginSection();
+                ImGui.TreePop();
+            }
+
             ImGui.TextWrapped("Browse and download available plugins from the ExileCore organization.");
             ImGui.Spacing();
 
@@ -830,7 +913,9 @@ namespace PluginUpdater
                              ImGuiTableFlags.ScrollX |
                              ImGuiTableFlags.ScrollY |
                              ImGuiTableFlags.RowBg |
-                             ImGuiTableFlags.Hideable;
+                             ImGuiTableFlags.Hideable |
+                             ImGuiTableFlags.Sortable |
+                             ImGuiTableFlags.SortTristate;
 
             var installedPlugins = _updater.GetPluginInfo();
 
@@ -849,18 +934,46 @@ namespace PluginUpdater
             float panelHeight = ImGui.GetContentRegionAvail().Y;
             float tableHeight = Math.Min(totalTableHeight, panelHeight * 0.60f);
 
-            if (!ImGui.BeginTable("##browsertable", 6, tableFlags, new System.Numerics.Vector2(-1, tableHeight)))
+            ImGui.InputTextWithHint("##filter", "Filter", ref _pluginNameFilter, 200);
+
+            if (!ImGui.BeginTable("##browsertable_v2", 6, tableFlags, new System.Numerics.Vector2(-1, tableHeight)))
                 return;
 
-            ImGui.TableSetupColumn("Plugin", ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableSetupColumn("Description", ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableSetupColumn("Original Author", ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableSetupColumn("Endorsed Fork", ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableSetupColumn("Last Updated", ImGuiTableColumnFlags.WidthFixed, 50);
-            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 50);
+            ImGui.TableSetupColumn("Plugin", ImGuiTableColumnFlags.WidthFixed, 150);
+            ImGui.TableSetupColumn("Description", ImGuiTableColumnFlags.WidthStretch, 1);
+            ImGui.TableSetupColumn("Original Author", ImGuiTableColumnFlags.WidthFixed, 150);
+            ImGui.TableSetupColumn("Endorsed Fork", ImGuiTableColumnFlags.WidthFixed, 150);
+            ImGui.TableSetupColumn("Last Updated", ImGuiTableColumnFlags.WidthFixed, 120);
+            ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoSort, 100);
             ImGui.TableHeadersRow();
 
-            foreach (var plugin in _availablePlugins)
+            var plugins = _availablePlugins.AsEnumerable();
+            plugins = plugins.Where(x => string.IsNullOrEmpty(_pluginNameFilter) || x.Name.Contains(_pluginNameFilter, StringComparison.OrdinalIgnoreCase));
+            var sortSpecs = ImGui.TableGetSortSpecs();
+            if (sortSpecs.SpecsCount > 0)
+            {
+                object SortSelector(PluginDescription x) =>
+                    sortSpecs.Specs.ColumnIndex switch
+                    {
+                        0 => x.Name,
+                        1 => x.Description,
+                        2 => x.OriginalAuthor,
+                        3 => x.EndorsedAuthor,
+                        4 => DateTime.Parse(x.GetEndorsedFork()?.LatestCommit?.Date ?? DateTime.UnixEpoch.ToString("O")),
+                        _ => 0,
+                    };
+
+                if (sortSpecs.Specs.SortDirection == ImGuiSortDirection.Ascending)
+                {
+                    plugins = plugins.OrderBy(SortSelector);
+                }
+                else if (sortSpecs.Specs.SortDirection == ImGuiSortDirection.Descending)
+                {
+                    plugins = plugins.OrderByDescending(SortSelector);
+                }
+            }
+
+            foreach (var plugin in plugins)
             {
                 ImGui.TableNextRow();
 
@@ -947,6 +1060,13 @@ namespace PluginUpdater
                 }
             }
 
+            ShowDeletePluginPopup();
+
+            ImGui.EndTable();
+        }
+
+        private void ShowDeletePluginPopup()
+        {
             if (ImGui.BeginPopupModal("Delete Plugin?"))
             {
                 ImGui.Text($"Are you sure you want to delete the plugin '{_pluginToDelete}'?");
@@ -968,6 +1088,7 @@ namespace PluginUpdater
                     {
                         _updater.DeletePlugin(_pluginToDelete);
                         _consoleLog.LogSuccess($"Successfully deleted plugin: {_pluginToDelete}");
+                        _pluginToDelete = null;
                         ImGui.CloseCurrentPopup();
                     }
                     catch (Exception ex)
@@ -987,8 +1108,6 @@ namespace PluginUpdater
 
                 ImGui.EndPopup();
             }
-
-            ImGui.EndTable();
         }
 
         private async Task DownloadPluginAsync(string pluginName, string cloneUrl)
