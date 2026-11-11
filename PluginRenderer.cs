@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using ExileCore;
 using ExileCore.Shared.Attributes;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 
 namespace PluginUpdater
 {

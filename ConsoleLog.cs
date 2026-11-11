@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Numerics;
 using ExileCore.Shared;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 
 namespace PluginUpdater
 {
@@ -61,7 +61,7 @@ namespace PluginUpdater
 
             var size = new Vector2(-1, -1);
             ImGui.PushStyleColor(ImGuiCol.ChildBg, new Vector4(0.2f, 0.2f, 0.2f, 1.0f));
-            if (ImGui.BeginChild("##consolelog", size, ImGuiChildFlags.Border,
+            if (ImGui.BeginChild("##consolelog", size, ImGuiChildFlags.Borders,
                     PluginUpdater.Instance.Settings.WrapLogMessages
                         ? ImGuiWindowFlags.None
                         : ImGuiWindowFlags.HorizontalScrollbar))
